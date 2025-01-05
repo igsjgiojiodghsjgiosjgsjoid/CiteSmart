@@ -11,6 +11,7 @@ import traceback
 import os
 import sys
 import logging
+import urllib.parse
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -30,24 +31,66 @@ def extract_text_from_pdf(pdf_file):
         pdf_reader = PyPDF2.PdfReader(pdf_bytes)
         logger.info(f"Successfully created PDF reader. Pages: {len(pdf_reader.pages)}")
         
-        # Extract text from all pages
+        # Extract text and look for DOIs from all pages
         text = ""
+        dois = set()
+        
         for page_num in range(len(pdf_reader.pages)):
             try:
                 page = pdf_reader.pages[page_num]
-                text += page.extract_text() + "\n"
-                logger.info(f"Extracted text from page {page_num + 1}")
+                page_text = page.extract_text()
+                text += page_text + "\n"
+                
+                # Extract DOIs from the page text
+                page_dois = extract_doi(page_text)
+                dois.update(page_dois)
+                
+                # Get any URLs from the page's annotations/links
+                if '/Annots' in page:
+                    annotations = page['/Annots']
+                    for annotation in annotations:
+                        if isinstance(annotation, PyPDF2.generic.IndirectObject):
+                            annotation = annotation.get_object()
+                        if annotation.get('/Subtype') == '/Link' and '/A' in annotation:
+                            if '/URI' in annotation['/A']:
+                                url = annotation['/A']['/URI']
+                                # Check if the URL contains a DOI
+                                url_dois = extract_doi(url)
+                                dois.update(url_dois)
+                
+                logger.info(f"Extracted text and DOIs from page {page_num + 1}")
             except Exception as e:
-                logger.error(f"Error extracting text from page {page_num + 1}: {str(e)}")
+                logger.error(f"Error extracting from page {page_num + 1}: {str(e)}")
                 continue
         
         if not text.strip():
             raise Exception("No text could be extracted from the PDF")
         
-        return text
+        return text, list(dois)
     except Exception as e:
         logger.error(f"Error in extract_text_from_pdf: {str(e)}")
         raise
+
+def extract_doi(text):
+    """Extract DOI from text using various patterns including URLs."""
+    # Standard DOI pattern
+    doi_patterns = [
+        r'\b(10\.\d{4,}/[-._;()/:\w]+)\b',  # Standard DOI pattern
+        r'https?://doi\.org/(10\.\d{4,}/[-._;()/:\w]+)',  # DOI URL pattern
+        r'https?://dx\.doi\.org/(10\.\d{4,}/[-._;()/:\w]+)'  # dx.doi.org pattern
+    ]
+    
+    dois = set()
+    for pattern in doi_patterns:
+        matches = re.finditer(pattern, text, re.IGNORECASE)
+        for match in matches:
+            # Extract just the DOI part if it's a URL
+            doi = match.group(1) if 'doi.org' in pattern else match.group(0)
+            # Clean up the DOI
+            doi = doi.strip().rstrip('.')
+            dois.add(doi)
+    
+    return list(dois)
 
 def process_text(text, search_query):
     try:
@@ -134,8 +177,9 @@ def handle_request():
         
         # Extract text from PDF
         try:
-            pdf_text = extract_text_from_pdf(file)
-            logger.info("Successfully extracted text from PDF")
+            pdf_text, dois = extract_text_from_pdf(file)
+            logger.info("Successfully extracted text and DOIs from PDF")
+            logger.info(f"Found DOIs: {dois}")
         except Exception as e:
             logger.error(f"Failed to extract text from PDF: {str(e)}")
             return jsonify({'error': 'Could not read the PDF file. Please make sure it\'s a valid PDF.'}), 400
@@ -143,9 +187,13 @@ def handle_request():
         # Process text and find matches
         try:
             results = process_text(pdf_text, search_text)
-            logger.info(f"Found {len(results)} matches")
-            logger.info(f"Response data: {{'results': {results}}}")
-            return jsonify({'results': results})
+            # Add DOIs to the response
+            response_data = {
+                'results': results,
+                'dois': dois
+            }
+            logger.info(f"Found {len(results)} matches and {len(dois)} DOIs")
+            return jsonify(response_data)
         except Exception as e:
             logger.error(f"Error processing text: {str(e)}")
             return jsonify({'error': 'Error processing text'}), 500
