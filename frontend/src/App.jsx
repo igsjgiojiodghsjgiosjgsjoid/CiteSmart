@@ -20,7 +20,10 @@ function App() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!selectedFile) return;
+    if (!selectedFile) {
+      setError('Please select a PDF file');
+      return;
+    }
 
     setLoading(true);
     setError(null);
@@ -36,25 +39,41 @@ function App() {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
-        timeout: 60000, // 60 second timeout
+        timeout: 60000,
       });
 
       console.log('Response from backend:', response.data);
       
-      if (response.data.error) {
-        throw new Error(response.data.error);
+      if (!response.data) {
+        throw new Error('No response data received');
       }
 
-      if (Array.isArray(response.data.results)) {
-        setResults(response.data.results);
-      } else {
-        throw new Error('Invalid response format from server');
+      if (response.data.error) {
+        setError(response.data.error);
+        return;
+      }
+
+      if (!Array.isArray(response.data.results)) {
+        throw new Error('Invalid response format: results should be an array');
+      }
+
+      setResults(response.data.results);
+      
+      if (response.data.results.length === 0) {
+        setError('No matching references found in the document');
       }
     } catch (err) {
       console.error('Error processing PDF:', err);
-      const errorMessage = err.response?.data?.error || err.message || 'An error occurred while processing your request';
-      setError(errorMessage);
       setResults(null);
+      if (err.response?.data?.error) {
+        setError(err.response.data.error);
+      } else if (err.code === 'ECONNABORTED') {
+        setError('Request timed out. The file might be too large or the server is busy.');
+      } else if (!navigator.onLine) {
+        setError('You appear to be offline. Please check your internet connection.');
+      } else {
+        setError(err.message || 'An error occurred while processing your request');
+      }
     } finally {
       setLoading(false);
     }
