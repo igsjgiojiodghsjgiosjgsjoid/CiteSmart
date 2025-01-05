@@ -19,37 +19,53 @@ function App() {
   }
 
   const handleSubmit = async (e) => {
-    e.preventDefault()
-    
-    try {
-      const formData = new FormData()
-      console.log('Selected file:', selectedFile)
-      console.log('File name:', selectedFile?.name)
-      console.log('File size:', selectedFile?.size, 'bytes')
-      
-      formData.append('file', selectedFile)
-      formData.append('searchText', searchText)
-      
-      setLoading(true)
-      setError(null)
-      setResults(null)
+    e.preventDefault();
+    if (!selectedFile) return;
 
-      console.log('Sending request to backend...')
+    setLoading(true);
+    setError(null);
+    setResults(null);
+
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+    formData.append('text', searchText);
+
+    try {
+      console.log('Sending request to backend...');
       const response = await axios.post('/api', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
-      })
-      console.log('Response from backend:', response.data)
+        timeout: 30000, // 30 second timeout
+      });
+
+      console.log('Response from backend:', response.data);
+      
+      if (response.data.error) {
+        setError(response.data.error);
+        return;
+      }
 
       if (response.data.results) {
-        setResults(response.data.results)
+        setResults(response.data.results);
+      } else {
+        setError('No results found in the response');
       }
     } catch (err) {
-      console.error('Error processing PDF:', err)
-      setError(err.response?.data?.error || err.message)
+      console.error('Error processing PDF:', err);
+      let errorMessage = 'An error occurred while processing your request';
+      
+      if (err.response?.data?.error) {
+        errorMessage = err.response.data.error;
+      } else if (err.code === 'ECONNABORTED') {
+        errorMessage = 'Request timed out. The file might be too large or the server is busy.';
+      } else if (!navigator.onLine) {
+        errorMessage = 'You appear to be offline. Please check your internet connection.';
+      }
+      
+      setError(errorMessage);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
   }
 
