@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Academic Reference Finder</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold text-center text-gray-800 mb-8">Academic Reference Finder</h1>
+        
+        <div class="max-w-2xl mx-auto bg-white rounded-lg shadow-md p-6">
+            <form id="uploadForm" class="space-y-6">
+                <div class="space-y-2">
+                    <label class="block text-sm font-medium text-gray-700">Upload PDF Reference</label>
+                    <input type="file" accept=".pdf" id="pdfFile" 
+                           class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+
+                <div class="space-y-2">
+                    <label class="block text-sm font-medium text-gray-700">Your Text</label>
+                    <textarea id="searchText" rows="4" 
+                            class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="Paste your text here to find relevant quotes..."></textarea>
+                </div>
+
+                <button type="submit" 
+                        class="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                    Find References
+                </button>
+            </form>
+
+            <div id="loading" class="hidden mt-6">
+                <div class="flex items-center justify-center">
+                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                    <span class="ml-2 text-gray-600">Processing...</span>
+                </div>
+            </div>
+
+            <div id="results" class="mt-6 space-y-4 hidden">
+                <h2 class="text-xl font-semibold text-gray-800">Found References</h2>
+                <div id="quotesList" class="space-y-4"></div>
+            </div>
+
+            <div id="error" class="hidden mt-6 p-4 bg-red-100 text-red-700 rounded-md"></div>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById('pdfFile');
+            const searchText = document.getElementById('searchText').value;
+            const loading = document.getElementById('loading');
+            const results = document.getElementById('results');
+            const error = document.getElementById('error');
+            const quotesList = document.getElementById('quotesList');
+
+            if (!fileInput.files[0]) {
+                error.textContent = 'Please select a PDF file';
+                error.classList.remove('hidden');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            formData.append('searchText', searchText);
+
+            try {
+                loading.classList.remove('hidden');
+                results.classList.add('hidden');
+                error.classList.add('hidden');
+
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    quotesList.innerHTML = '';
+                    data.quotes.forEach(quote => {
+                        const quoteElement = document.createElement('div');
+                        quoteElement.className = 'p-4 bg-gray-50 rounded-lg space-y-2';
+                        quoteElement.innerHTML = `
+                            <p class="text-gray-600 italic">"${quote.quote}"</p>
+                            <p class="text-sm text-gray-500">Page: ${quote.page}</p>
+                            <p class="text-sm font-medium">Citation: ${quote.citation}</p>
+                        `;
+                        quotesList.appendChild(quoteElement);
+                    });
+                    
+                    results.classList.remove('hidden');
+                } else {
+                    throw new Error(data.error || 'Failed to process PDF');
+                }
+            } catch (err) {
+                error.textContent = err.message;
+                error.classList.remove('hidden');
+            } finally {
+                loading.classList.add('hidden');
+            }
+        });
+    </script>
+</body>
+</html>
