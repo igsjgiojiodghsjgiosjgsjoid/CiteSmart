@@ -10,42 +10,71 @@ import re
 import traceback
 import os
 
+# Set NLTK data path to a writable directory
+nltk.data.path.append("/tmp/nltk_data")
+
 # Download required NLTK data
 try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt')
-try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords')
+    nltk.download('punkt', download_dir="/tmp/nltk_data")
+    nltk.download('stopwords', download_dir="/tmp/nltk_data")
+except Exception as e:
+    print(f"Error downloading NLTK data: {str(e)}")
 
 app = Flask(__name__)
 CORS(app)
 
 def extract_text_from_pdf(pdf_file):
     try:
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        # Create a temporary file-like object
+        pdf_bytes = pdf_file.read()
+        pdf_io = io.BytesIO(pdf_bytes)
+        
+        # Try to read the PDF
+        try:
+            pdf_reader = PyPDF2.PdfReader(pdf_io)
+        except Exception as e:
+            print(f"Error creating PDF reader: {str(e)}")
+            raise Exception("Could not read the PDF file. Please make sure it's a valid PDF.")
+        
+        # Extract text
         text = ""
         for page in pdf_reader.pages:
-            text += page.extract_text()
+            try:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+            except Exception as e:
+                print(f"Error extracting text from page: {str(e)}")
+                continue
+        
+        if not text.strip():
+            raise Exception("No text could be extracted from the PDF. The file might be scanned or protected.")
+        
         return text
+        
     except Exception as e:
-        print(f"Error extracting text from PDF: {str(e)}")
-        raise Exception("Failed to extract text from PDF. Please make sure it's a valid PDF file.")
+        print(f"Error in extract_text_from_pdf: {str(e)}")
+        print(traceback.format_exc())
+        raise
 
 def preprocess_text(text):
-    # Convert to lowercase
-    text = text.lower()
-    # Remove special characters and extra whitespace
-    text = re.sub(r'[^\w\s]', ' ', text)
-    text = ' '.join(text.split())
-    return text
+    try:
+        # Convert to lowercase
+        text = text.lower()
+        # Remove special characters and extra whitespace
+        text = re.sub(r'[^\w\s]', ' ', text)
+        text = ' '.join(text.split())
+        return text
+    except Exception as e:
+        print(f"Error in preprocess_text: {str(e)}")
+        raise
 
 def find_similar_sentences(pdf_text, search_text, threshold=0.3):
     try:
         # Tokenize PDF text into sentences
         sentences = sent_tokenize(pdf_text)
+        if not sentences:
+            raise Exception("Could not identify any sentences in the PDF text")
         
         # Preprocess search text
         search_text = preprocess_text(search_text)
@@ -55,34 +84,40 @@ def find_similar_sentences(pdf_text, search_text, threshold=0.3):
         stop_words = set(stopwords.words('english'))
         search_words = search_words - stop_words
         
+        if not search_words:
+            raise Exception("No meaningful search terms found after preprocessing")
+        
         similar_sentences = []
         
         for i, sentence in enumerate(sentences):
-            # Preprocess sentence
-            processed_sentence = preprocess_text(sentence)
-            sentence_words = set(word_tokenize(processed_sentence))
-            
-            # Remove stopwords from sentence words
-            sentence_words = sentence_words - stop_words
-            
-            # Calculate similarity
-            if len(search_words) > 0 and len(sentence_words) > 0:
-                common_words = search_words.intersection(sentence_words)
-                similarity = len(common_words) / len(search_words)
+            try:
+                # Preprocess sentence
+                processed_sentence = preprocess_text(sentence)
+                sentence_words = set(word_tokenize(processed_sentence))
                 
-                if similarity >= threshold:
-                    similar_sentences.append({
-                        'text': sentences[i],
-                        'page': 1,
-                        'similarity': float(similarity)  # Convert to float for JSON serialization
-                    })
+                # Remove stopwords from sentence words
+                sentence_words = sentence_words - stop_words
+                
+                # Calculate similarity
+                if len(search_words) > 0 and len(sentence_words) > 0:
+                    common_words = search_words.intersection(sentence_words)
+                    similarity = len(common_words) / len(search_words)
+                    
+                    if similarity >= threshold:
+                        similar_sentences.append({
+                            'text': sentences[i],
+                            'page': 1,
+                            'similarity': float(similarity)
+                        })
+            except Exception as e:
+                print(f"Error processing sentence {i}: {str(e)}")
+                continue
         
-        # Sort by similarity score
-        similar_sentences.sort(key=lambda x: x['similarity'], reverse=True)
         return similar_sentences
     except Exception as e:
-        print(f"Error finding similar sentences: {str(e)}")
-        raise Exception("Failed to process text comparison")
+        print(f"Error in find_similar_sentences: {str(e)}")
+        print(traceback.format_exc())
+        raise
 
 @app.route('/', methods=['POST', 'OPTIONS'])
 def handler():
@@ -119,8 +154,6 @@ def handler():
         # Extract text from PDF
         try:
             pdf_text = extract_text_from_pdf(file)
-            if not pdf_text.strip():
-                return jsonify({'error': 'No text could be extracted from the PDF'}), 400
         except Exception as e:
             print(f"PDF extraction error: {str(e)}")
             return jsonify({'error': str(e)}), 400
@@ -128,14 +161,10 @@ def handler():
         # Find similar sentences
         try:
             results = find_similar_sentences(pdf_text, search_text)
-            if not results:
-                return jsonify({'results': []})
+            return jsonify({'results': results or []})
         except Exception as e:
             print(f"Text processing error: {str(e)}")
             return jsonify({'error': str(e)}), 400
-        
-        print(f"Found {len(results)} matches")
-        return jsonify({'results': results})
         
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
