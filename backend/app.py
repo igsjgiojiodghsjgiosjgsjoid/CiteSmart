@@ -6,81 +6,17 @@ import re
 from datetime import datetime
 from werkzeug.utils import secure_filename
 import os
+import json
+import requests
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='pdfs')
 CORS(app)
 
-def extract_pdf_metadata(pdf_reader):
-    """Extract metadata from PDF by analyzing the content."""
-    try:
-        # Get text from first few pages
-        first_pages_text = ""
-        for page in pdf_reader.pages[:3]:
-            first_pages_text += page.extract_text()
-        
-        # Look for author patterns
-        author = None
-        author_patterns = [
-            r'by\s*([\w\s\.,]+?)(?:\d|Abstract|Introduction|$)',
-            r'Author[s]?[:;\s]+([\w\s\.,]+?)(?:\d|Abstract|Introduction|$)',
-            r'([\w\s\.,]+?)\s*\(?\d{4}\)?[,\s]*Department',
-            r'([\w\s\.,]+?)\s*\(?\d{4}\)?[,\s]*University',
-        ]
-        
-        for pattern in author_patterns:
-            match = re.search(pattern, first_pages_text, re.IGNORECASE)
-            if match:
-                author = match.group(1).strip()
-                # Clean up author name
-                author = re.sub(r'\s+', ' ', author)
-                author = author.strip('., ')
-                break
-        
-        # If no author found, try metadata
-        if not author:
-            metadata = pdf_reader.metadata
-            if metadata and metadata.get('/Author'):
-                author = metadata.get('/Author').strip()
-        
-        # Default if still no author
-        author = author or 'Unknown Author'
-        
-        # Look for year patterns
-        year = None
-        year_patterns = [
-            r'(\d{4})',
-            r'copyright\s*(\d{4})',
-            r'published\s*in\s*(\d{4})',
-            r'(\d{4})\s*\.',
-            r'\((\d{4})\)',
-            r'[\s,.](\d{4})[\s,.]',
-        ]
-        
-        for pattern in year_patterns:
-            match = re.search(pattern, first_pages_text, re.IGNORECASE)
-            if match:
-                year = match.group(1)
-                break
-        
-        # If no year found, try metadata
-        if not year and pdf_reader.metadata:
-            for key in ['/CreationDate', '/ModDate']:
-                date = pdf_reader.metadata.get(key, '')
-                if date:
-                    year_match = re.search(r'(\d{4})', str(date))
-                    if year_match:
-                        year = year_match.group(1)
-                        break
-        
-        # Default if still no year
-        year = year or str(datetime.now().year)
-        
-        print(f"Extracted metadata - Author: {author}, Year: {year}")
-        return author, year
-        
-    except Exception as e:
-        print(f"Error extracting metadata: {str(e)}")
-        return 'Unknown Author', str(datetime.now().year)
+# Configure upload folder
+UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pdfs')
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 def extract_text_from_pdf(file):
     """Extract text from PDF file."""
@@ -96,139 +32,204 @@ def extract_text_from_pdf(file):
         print(f"Error extracting text: {str(e)}")
         return {}
 
-def find_page_number(text_by_page, quote_text):
-    """Find the actual page number where the quote appears."""
-    for page_num, page_text in text_by_page.items():
-        # Clean and normalize texts for comparison
-        clean_page = ' '.join(page_text.split())
-        clean_quote = ' '.join(quote_text.split())
-        
-        if clean_quote in clean_page:
-            return page_num
-    return 1  # fallback to page 1 if not found
+def extract_doi_from_text(text):
+    """Extract DOI from text using regex patterns."""
+    # Common DOI patterns
+    doi_patterns = [
+        r'doi\.org/([^\s]+)',
+        r'DOI:\s*([^\s]+)',
+        r'doi:([^\s]+)',
+        r'(?:https?://)?(?:dx\.)?doi\.org/(.+)',
+    ]
+    
+    for pattern in doi_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            doi = match.group(1).strip()
+            # Clean up DOI
+            doi = doi.rstrip('.')
+            return doi
+    return None
 
-def normalize_text(text):
-    """Normalize text by removing extra spaces and newlines."""
-    # Remove extra whitespace and normalize spaces
-    return ' '.join(text.split())
+def get_metadata_from_crossref(doi):
+    """Fetch metadata from Crossref API using DOI."""
+    try:
+        headers = {
+            'User-Agent': 'ReferenceFinder/1.0 (mailto:your-email@example.com)'
+        }
+        response = requests.get(f'https://api.crossref.org/works/{doi}', headers=headers)
+        if response.status_code == 200:
+            data = response.json()['message']
+            
+            # Extract author names
+            authors = []
+            if 'author' in data:
+                for author in data['author']:
+                    if 'given' in author and 'family' in author:
+                        authors.append(f"{author['given']} {author['family']}")
+                    elif 'family' in author:
+                        authors.append(author['family'])
+            
+            # Extract publication date
+            published_date = ''
+            if 'published-print' in data:
+                date_parts = data['published-print']['date-parts'][0]
+                published_date = str(date_parts[0])  # Year
+                if len(date_parts) > 1:
+                    published_date += f"-{date_parts[1]:02d}"  # Month
+                if len(date_parts) > 2:
+                    published_date += f"-{date_parts[2]:02d}"  # Day
+            
+            return {
+                'title': data.get('title', [''])[0],
+                'authors': authors,
+                'published_date': published_date,
+                'doi': doi,
+                'journal': data.get('container-title', [''])[0],
+                'publisher': data.get('publisher', ''),
+                'type': data.get('type', '')
+            }
+    except Exception as e:
+        print(f"Error fetching metadata from Crossref: {str(e)}")
+    return None
+
+def extract_metadata(pdf_reader, file_path):
+    """Extract metadata from PDF and enhance with Crossref data."""
+    # First try to get DOI from PDF text
+    doi = None
+    text = ""
+    
+    # Try first few pages for DOI
+    for i in range(min(3, len(pdf_reader.pages))):
+        try:
+            page_text = pdf_reader.pages[i].extract_text()
+            text += page_text
+            doi = extract_doi_from_text(page_text)
+            if doi:
+                break
+        except Exception as e:
+            print(f"Error extracting text from page {i}: {str(e)}")
+    
+    # If DOI found, try to get metadata from Crossref
+    if doi:
+        crossref_metadata = get_metadata_from_crossref(doi)
+        if crossref_metadata:
+            return crossref_metadata
+    
+    # Fallback to PDF metadata if Crossref fails
+    try:
+        info = pdf_reader.metadata
+        if info:
+            author = info.get('/Author', 'Unknown Author')
+            title = info.get('/Title', 'Untitled')
+            year = info.get('/CreationDate', '')
+            if year and len(year) >= 4:
+                year = year[2:6]
+            else:
+                year = 'Unknown Year'
+                
+            return {
+                'title': title,
+                'authors': [author] if author != 'Unknown Author' else [],
+                'published_date': year,
+                'doi': doi if doi else 'Not found',
+                'journal': 'Unknown',
+                'publisher': 'Unknown',
+                'type': 'Unknown'
+            }
+    except Exception as e:
+        print(f"Error extracting PDF metadata: {str(e)}")
+    
+    # Return default metadata if all else fails
+    return {
+        'title': 'Untitled',
+        'authors': [],
+        'published_date': 'Unknown',
+        'doi': 'Not found',
+        'journal': 'Unknown',
+        'publisher': 'Unknown',
+        'type': 'Unknown'
+    }
 
 def find_matching_quotes(text_by_page, search_text):
     """Find quotes from the PDF that contain the search terms."""
-    search_terms = [term.lower() for term in search_text.split()]
+    search_terms = search_text.lower().split()
     matches = []
     
-    print(f"Searching for terms: {search_terms}")
-    
+    # Look through each page
     for page_num, page_text in text_by_page.items():
-        # Create a clean version for searching but keep original for display
-        clean_page = ' '.join(page_text.split())
-        sentences = sent_tokenize(clean_page)
+        page_text_lower = page_text.lower()
         
-        # Look for matches in groups of sentences
-        for i in range(len(sentences)):
-            current_sentence = sentences[i].strip()
-            current_lower = current_sentence.lower()
-            
-            # Check if any search term is in the current sentence
-            matching_terms = [term for term in search_terms 
-                            if term in current_lower]
-            
-            if matching_terms:
-                # Get surrounding context
-                start_idx = max(0, i - 1)
-                end_idx = min(len(sentences), i + 2)
-                context_sentences = sentences[start_idx:end_idx]
+        # Split text into sentences
+        sentences = page_text.replace('\n', ' ').split('.')
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
                 
-                # Create a clean version of the quote for searching
-                clean_quote = ' '.join(context_sentences)
+            # Check if all search terms are in this sentence
+            sentence_lower = sentence.lower()
+            if all(term in sentence_lower for term in search_terms):
+                # Highlight matching terms
+                highlighted_text = sentence
+                for term in search_terms:
+                    pattern = re.compile(re.escape(term), re.IGNORECASE)
+                    highlighted_text = pattern.sub(f"<mark>{term}</mark>", highlighted_text)
                 
-                # Find the quote in the original text by matching first and last words
-                quote_words = clean_quote.split()
-                first_word = re.escape(quote_words[0])
-                last_word = re.escape(quote_words[-1])
-                
-                # Create a pattern that matches from first word to last word
-                pattern = f"{first_word}.*?{last_word}"
-                
-                # Find the quote in the original text
-                match = re.search(pattern, page_text, re.DOTALL)
-                if match:
-                    exact_quote = match.group(0)
-                    
-                    matches.append({
-                        'quote': exact_quote,
-                        'page': page_num,
-                        'relevance': len(matching_terms),
-                        'highlighted_terms': matching_terms
-                    })
-                    print(f"Found match on page {page_num} with {len(matching_terms)} matching terms")
+                matches.append({
+                    'text': highlighted_text,
+                    'page': page_num,
+                    'terms': search_terms
+                })
     
-    # Sort by relevance
-    matches.sort(key=lambda x: x['relevance'], reverse=True)
-    print(f"Found {len(matches)} total matching quotes")
-    return matches  # Return all matches instead of limiting to 5
+    return matches
 
-@app.route('/pdf/<filename>')
+@app.route('/pdfs/<path:filename>')
 def serve_pdf(filename):
-    """Serve the PDF file."""
-    try:
-        return send_from_directory('uploads', filename)
-    except Exception as e:
-        return str(e), 404
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    """Handle file upload and search."""
+@app.route('/api', methods=['POST'])
+def process_pdf():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'})
+    
+    file = request.files['file']
+    search_text = request.form.get('text', '')
+    
+    if not file or file.filename == '':
+        return jsonify({'error': 'No file selected'})
+    
+    if not file.filename.endswith('.pdf'):
+        return jsonify({'error': 'Please upload a PDF file'})
+    
     try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file uploaded'}), 400
-            
-        file = request.files['file']
-        search_text = request.form.get('searchText', '').strip()
-        
-        if not file or file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-            
-        if not search_text:
-            return jsonify({'error': 'No search text provided'}), 400
-        
-        # Save the file with a secure filename
+        # Save the uploaded file
         filename = secure_filename(file.filename)
-        if not os.path.exists('uploads'):
-            os.makedirs('uploads')
-        filepath = os.path.join('uploads', filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
         
         # Process the PDF
-        text_by_page = {}
-        try:
-            with open(filepath, 'rb') as pdf_file:
-                pdf_reader = PdfReader(pdf_file)
-                author, year = extract_pdf_metadata(pdf_reader)
-                text_by_page = extract_text_from_pdf(pdf_file)
-                
-                if not text_by_page:
-                    return jsonify({'error': 'Could not extract text from PDF'}), 400
-                
-                # Find matching quotes
-                quotes = find_matching_quotes(text_by_page, search_text)
-                
-                # Add citation to each quote
-                for quote in quotes:
-                    quote['citation'] = f'({author}, {year}, p. {quote["page"]})'
-                
-                return jsonify({
-                    'quotes': quotes,
-                    'filename': filename
-                })
-                
-        except Exception as e:
-            print(f"Error processing PDF: {str(e)}")
-            return jsonify({'error': f'Failed to process PDF: {str(e)}'}), 400
+        pdf_reader = PdfReader(filepath)
+        metadata = extract_metadata(pdf_reader, filepath)
+        
+        # Extract text from each page
+        text_by_page = extract_text_from_pdf(filepath)
+        
+        # Find matching quotes
+        matches = find_matching_quotes(text_by_page, search_text)
+        
+        # Add metadata to response
+        response = {
+            'results': matches,
+            'pdf_url': f'http://localhost:5003/pdfs/{filename}',
+            'metadata': metadata
+        }
+        
+        return jsonify(response)
         
     except Exception as e:
-        print(f"Upload error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e)})
 
 if __name__ == '__main__':
-    app.run(port=5002, debug=True)
+    app.run(port=5003, debug=True)
