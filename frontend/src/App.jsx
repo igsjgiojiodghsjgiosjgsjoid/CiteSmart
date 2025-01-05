@@ -36,34 +36,25 @@ function App() {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
-        timeout: 30000, // 30 second timeout
+        timeout: 60000, // 60 second timeout
       });
 
       console.log('Response from backend:', response.data);
       
       if (response.data.error) {
-        setError(response.data.error);
-        return;
+        throw new Error(response.data.error);
       }
 
-      if (response.data.results) {
+      if (Array.isArray(response.data.results)) {
         setResults(response.data.results);
       } else {
-        setError('No results found in the response');
+        throw new Error('Invalid response format from server');
       }
     } catch (err) {
       console.error('Error processing PDF:', err);
-      let errorMessage = 'An error occurred while processing your request';
-      
-      if (err.response?.data?.error) {
-        errorMessage = err.response.data.error;
-      } else if (err.code === 'ECONNABORTED') {
-        errorMessage = 'Request timed out. The file might be too large or the server is busy.';
-      } else if (!navigator.onLine) {
-        errorMessage = 'You appear to be offline. Please check your internet connection.';
-      }
-      
+      const errorMessage = err.response?.data?.error || err.message || 'An error occurred while processing your request';
       setError(errorMessage);
+      setResults(null);
     } finally {
       setLoading(false);
     }

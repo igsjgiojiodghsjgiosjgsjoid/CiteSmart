@@ -8,6 +8,7 @@ from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 import re
 import traceback
+import os
 
 # Download required NLTK data
 try:
@@ -20,7 +21,7 @@ except LookupError:
     nltk.download('stopwords')
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app)
 
 def extract_text_from_pdf(pdf_file):
     try:
@@ -72,8 +73,8 @@ def find_similar_sentences(pdf_text, search_text, threshold=0.3):
                 if similarity >= threshold:
                     similar_sentences.append({
                         'text': sentences[i],
-                        'page': 1,  # You might want to track page numbers
-                        'similarity': similarity
+                        'page': 1,
+                        'similarity': float(similarity)  # Convert to float for JSON serialization
                     })
         
         # Sort by similarity score
@@ -86,64 +87,60 @@ def find_similar_sentences(pdf_text, search_text, threshold=0.3):
 @app.route('/', methods=['POST', 'OPTIONS'])
 def handler():
     if request.method == 'OPTIONS':
-        headers = {
+        return ('', 204, {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'POST',
             'Access-Control-Allow-Headers': 'Content-Type',
-        }
-        return ('', 204, headers)
+        })
 
-    if request.method == 'POST':
+    try:
+        print("Received request")
+        
+        # Validate request
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if not file:
+            return jsonify({'error': 'No file selected'}), 400
+        
+        if not file.filename:
+            return jsonify({'error': 'No filename provided'}), 400
+            
+        if not file.filename.lower().endswith('.pdf'):
+            return jsonify({'error': 'Only PDF files are supported'}), 400
+        
+        search_text = request.form.get('text', '').strip()
+        if not search_text:
+            return jsonify({'error': 'No search text provided'}), 400
+        
+        print(f"Processing file: {file.filename}")
+        
+        # Extract text from PDF
         try:
-            print("Received request")
-            
-            if 'file' not in request.files:
-                return jsonify({'error': 'No file provided'}), 400
-            
-            file = request.files['file']
-            search_text = request.form.get('text', '')
-            
-            if not file:
-                return jsonify({'error': 'No file selected'}), 400
-            
-            if not search_text:
-                return jsonify({'error': 'No search text provided'}), 400
-            
-            if not file.filename.lower().endswith('.pdf'):
-                return jsonify({'error': 'Only PDF files are supported'}), 400
-            
-            print(f"Processing file: {file.filename}")
-            
-            # Extract text from PDF
-            try:
-                pdf_text = extract_text_from_pdf(file)
-            except Exception as e:
-                print(f"PDF extraction error: {str(e)}")
-                return jsonify({'error': str(e)}), 400
-            
+            pdf_text = extract_text_from_pdf(file)
             if not pdf_text.strip():
-                return jsonify({'error': 'Could not extract text from PDF'}), 400
-            
-            # Find similar sentences
-            try:
-                results = find_similar_sentences(pdf_text, search_text)
-            except Exception as e:
-                print(f"Text processing error: {str(e)}")
-                return jsonify({'error': str(e)}), 400
-            
-            if not results:
-                return jsonify({'results': [], 'message': 'No matching references found'}), 200
-            
-            print(f"Found {len(results)} matches")
-            return jsonify({'results': results})
-            
+                return jsonify({'error': 'No text could be extracted from the PDF'}), 400
         except Exception as e:
-            print(f"Unexpected error: {str(e)}")
-            print(traceback.format_exc())
-            return jsonify({'error': 'An unexpected error occurred'}), 500
+            print(f"PDF extraction error: {str(e)}")
+            return jsonify({'error': str(e)}), 400
+        
+        # Find similar sentences
+        try:
+            results = find_similar_sentences(pdf_text, search_text)
+            if not results:
+                return jsonify({'results': []})
+        except Exception as e:
+            print(f"Text processing error: {str(e)}")
+            return jsonify({'error': str(e)}), 400
+        
+        print(f"Found {len(results)} matches")
+        return jsonify({'results': results})
+        
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        print(traceback.format_exc())
+        return jsonify({'error': 'An unexpected error occurred. Please try again.'}), 500
 
-    return jsonify({'error': 'Method not allowed'}), 405
-
-# For local development
 if __name__ == '__main__':
     app.run(port=5002, debug=True)
